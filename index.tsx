@@ -18,10 +18,13 @@
 
 import { Devs } from "@utils/constants";
 import definePlugin from "@utils/types";
+import { findByPropsLazy } from "@webpack";
 import { ChannelStore, FluxDispatcher, SelectedChannelStore, UserStore } from "@webpack/common";
 
-let updatePreview: Function;
+let updatePreviewFunc: Function;
 let stream: any;
+
+const { setGoLiveSource } = findByPropsLazy("setGoLiveSource");
 
 function listener(e) {
     updatePreviewListener(e);
@@ -29,12 +32,19 @@ function listener(e) {
 }
 
 function updatePreviewListener(e) {
-    if (e.code !== "KeyR" || !e.ctrlKey || !e.shiftKey || !stream || !updatePreview) return;
+    if (e.code !== "KeyR" || !e.ctrlKey || !e.shiftKey) return;
+
+    updatePreview(stream);
+}
+
+function updatePreview(stream) {
+    if (!stream || !updatePreviewFunc) return;
 
     const { guildId: t, channelId: n, userId: i, streamId: o, context: a } = stream;
 
-    updatePreview(o, t, n, i);
+    updatePreviewFunc(o, t, n, i);
 }
+
 
 function startStreamListener(e) {
     if (e.code !== "KeyS" || !e.ctrlKey || !e.shiftKey || stream) return;
@@ -42,21 +52,37 @@ function startStreamListener(e) {
     startStream();
 }
 
-function startStream() {
+async function startStream() {
     const channelId = SelectedChannelStore.getChannelId();
     const guildId = channelId ? ChannelStore.getChannel(channelId).getGuildId() : null;
 
     if (!guildId || !channelId) return;
 
-    FluxDispatcher.dispatch({
+    const sourceName = "OBS Virtual Camera";
+    const audioSourceId = "{0.0.1.00000000}.{ae6ece1b-a964-4211-8e70-dff338710df5}";
+
+    await setGoLiveSource({
+        "cameraSettings": {
+            "videoDeviceGuid": sourceName,
+            "audioDeviceGuid": audioSourceId
+        },
+        "qualityOptions": {
+            "preset": 3,
+            "resolution": 1080,
+            "frameRate": 30
+        },
+        "context": "stream"
+    });
+
+    await FluxDispatcher.dispatch({
         type: "STREAM_START",
         streamType: "guild",
         guildId: guildId,
         channelId: channelId,
         appContext: "APP",
-        sourceId: "camera:OBS Virtual Camera",
-        sourceName: "OBS Virtual Camera",
-        audioSourceId: "{0.0.1.00000000}.{ae6ece1b-a964-4211-8e70-dff338710df5}",
+        sourceId: `camera:${sourceName}`,
+        sourceName: sourceName,
+        audioSourceId: audioSourceId,
         sound: true,
         previewDisabled: false
     });
@@ -79,8 +105,11 @@ export default definePlugin({
                 match: /\i\.stop\(\),/,
                 replace: ""
             }, {
-                match: /let (\i)=\i\(\)\.debounce.+?,\d+\);/,
-                replace: "$&$self.saveUpdatePreview($1);"
+                match: /(?<=let (\i)=\i\(\)\.debounce.+?,\d+\);)/,
+                replace: "$self.saveUpdatePreview($1);"
+            }, {
+                match: /,\i\(\i,\i,\i,\i\)/,
+                replace: ""
             }]
         }
     ],
@@ -94,16 +123,27 @@ export default definePlugin({
             const myId = UserStore.getCurrentUser().id;
             const { guildId: t, channelId: n, userId: i, streamId: o, context: a } = e;
 
-            if (a !== "stream" || !o || i !== myId || !updatePreview) return;
+            if (a !== "stream" || !o || i !== myId || !updatePreviewFunc) return;
 
+            const isStart = !stream;
             stream = e;
+
+            if (!isStart) return;
+
+            updatePreview(stream);
         },
         STREAM_DELETE: () => {
+            stream = null;
+        },
+        LOGOUT: () => {
+            stream = null;
+        },
+        CONNECTION_OPEN: () => {
             stream = null;
         }
     },
 
     saveUpdatePreview: (func: Function) => {
-        updatePreview = func;
+        updatePreviewFunc = func;
     },
 });
