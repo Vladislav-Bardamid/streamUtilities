@@ -21,7 +21,7 @@ import definePlugin from "@utils/types";
 import { findByPropsLazy } from "@webpack";
 import { ChannelStore, FluxDispatcher, SelectedChannelStore, UserStore } from "@webpack/common";
 
-let updatePreviewFunc: Function;
+let updatePreviewFunc: any;
 let stream: any;
 
 const { setGoLiveSource } = findByPropsLazy("setGoLiveSource");
@@ -34,15 +34,16 @@ function listener(e) {
 function updatePreviewListener(e) {
     if (e.code !== "KeyR" || !e.ctrlKey || !e.shiftKey) return;
 
-    updatePreview(stream);
+    updatePreview();
 }
 
-function updatePreview(stream) {
-    if (!stream || !updatePreviewFunc) return;
+async function updatePreview() {
+    if (!stream) return;
 
-    const { guildId: t, channelId: n, userId: i, streamId: o, context: a } = stream;
+    const { guildId, channelId, userId, streamId, context } = stream;
 
-    updatePreviewFunc(o, t, n, i);
+    await updatePreviewFunc(streamId, guildId, channelId, userId);
+    updatePreviewFunc.flush();
 }
 
 
@@ -121,25 +122,16 @@ export default definePlugin({
     flux: {
         RTC_CONNECTION_VIDEO: e => {
             const myId = UserStore.getCurrentUser().id;
-            const { guildId: t, channelId: n, userId: i, streamId: o, context: a } = e;
+            const { guildId, channelId, userId, streamId, context } = e;
 
-            if (a !== "stream" || !o || i !== myId || !updatePreviewFunc) return;
+            if (context !== "stream" || userId !== myId) return;
 
             const isStart = !stream;
-            stream = e;
+            stream = streamId ? e : null;
 
             if (!isStart) return;
 
-            updatePreview(stream);
-        },
-        STREAM_DELETE: () => {
-            stream = null;
-        },
-        LOGOUT: () => {
-            stream = null;
-        },
-        CONNECTION_OPEN: () => {
-            stream = null;
+            updatePreview();
         }
     },
 
