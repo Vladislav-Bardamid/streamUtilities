@@ -18,16 +18,25 @@
 
 import { definePluginSettings } from "@api/Settings";
 import { getUserSettingLazy } from "@api/UserSettings";
-import { Devs } from "@utils/constants";
+import { ScreenshareIcon } from "@components/index";
 import definePlugin, { OptionType } from "@utils/types";
-import { findLazy, findStoreLazy } from "@webpack";
-import { ChannelStore, FluxDispatcher, SelectedChannelStore, UserStore } from "@webpack/common";
+import { chooseFile } from "@utils/web";
+import { User } from "@vencord/discord-types";
+import { findByPropsLazy, findLazy, findStoreLazy } from "@webpack";
+import { ChannelStore, Constants, FluxDispatcher, Menu, RestAPI, SelectedChannelStore, UserStore } from "@webpack/common";
+
+import { FrameData, RTCConnectionVideoEventArgs, Stream, StreamStartEventArgs } from "./types";
 
 const ApplicationStreamingStore = findStoreLazy("ApplicationStreamingStore");
 const disableStreamPreviews = getUserSettingLazy<boolean>("voiceAndVideo", "disableStreamPreviews")!;
 const ChannelTypes = findLazy(m => m.ANNOUNCEMENT_THREAD === 10);
+const { setGoLiveSource } = findByPropsLazy("setGoLiveSource");
 
-let updatePreviewFunc: any;
+const maxWidth = 512;
+const maxHeight = 512;
+
+let retryUpdate: any | undefined;
+
 let streamId: number;
 
 const settings = definePluginSettings({
@@ -49,46 +58,30 @@ const settings = definePluginSettings({
 export default definePlugin({
     name: "streamUtilities",
     description: "A set of utilities for managing and enhancing streaming functionality",
-    authors: [Devs.Zorian],
-    patches: [
-        {
-            find: "\"ApplicationStreamPreviewUploadManager\"",
-            all: true,
-            replacement: [{
-                match: /\i===\i&&\(\i\?(?:\i\.start\(\i,(\i)\):?){2}\)/,
-                replace: ""
-            }, {
-                match: /,\i===\i&&\i\.start\(\i,\i\)/,
-                replace: ""
-            }, {
-                match: /\i\.stop\(\),/,
-                replace: ""
-            }, {
-                match: /(?<=let (\i)=\i\(\)\.debounce.+?,\d+\);)/,
-                replace: "$self.saveUpdatePreview($1);"
-            }, {
-                match: /,\i\(\i,\i,\i,\i\)/,
-                replace: ""
-            }, {
-                match: /_\.\i\.subscribe\("CONNECTION_OPEN",\i\),/,
-                replace: ""
-            }, {
-                match: /_\.\i\.subscribe\("LOGOUT",\i\),/,
-                replace: ""
-            }, {
-                match: /_\.\i\.subscribe\("STREAM_DELETE",\i\),/,
-                replace: ""
-            }]
-        }
-    ],
+    authors: [/* Devs.Zorian*/],
 
     settings,
 
-    start: () => {
-        document.addEventListener("keydown", e => {
-            if (e.code !== "KeyS" || !e.ctrlKey || !e.shiftKey || e.altKey) return;
+    contextMenus: {
+        "stream-context": streamContext,
+        "manage-streams": streamsContext,
+        "user-context": userContext
+    },
 
-            streamId ? updatePreview() : startStream();
+    start: () => {
+        setGoLiveSource({
+            "qualityOptions": {
+                "preset": 3,
+                "resolution": 1080,
+                "frameRate": 30
+            },
+            "context": "stream"
+        });
+
+        document.addEventListener("keydown", e => {
+            if (e.code !== "KeyS" || !e.ctrlKey || !e.shiftKey || e.altKey || streamId) return;
+
+            startStream();
         });
     },
 
@@ -98,33 +91,145 @@ export default definePlugin({
 
             if (e.context !== "stream" || e.userId !== myId) return;
 
-            const isStart = !streamId;
             streamId = e.streamId;
 
-            if (!isStart) return;
+            if (streamId || !retryUpdate) return;
 
-            updatePreview();
+            clearTimeout(retryUpdate);
+            retryUpdate = undefined;
         },
         STREAM_START: (e: StreamStartEventArgs) => {
             saveStreamSettings(e);
-        },
-    },
-
-    saveUpdatePreview: (func: Function) => {
-        updatePreviewFunc = func;
-    },
+        }
+    }
 });
 
-async function updatePreview() {
-    if (!streamId || disableStreamPreviews.getSetting()) return;
+async function uploadPreview(stream: Stream) {
+    const streamKey = `${stream.streamType}:${stream.guildId}:${stream.channelId}:${stream.ownerId}`;
 
-    const stream = ApplicationStreamingStore.getCurrentUserActiveStream() as Stream;
+    const file = await chooseFile("image/*");
+    if (!file) return;
 
-    await updatePreviewFunc(streamId, stream.guildId, stream.channelId, stream.ownerId);
-    await updatePreviewFunc.flush();
+    const image = await createImageBitmap(file);
+    updatePreview(streamKey, image);
 }
 
-function startStream() {
+async function uploadScreenPreview(streamKey: string) {
+    const discordVoice = DiscordNative.nativeModules.requireModule("discord_voice");
+
+    const frame = await discordVoice.getNextVideoOutputFrame(streamId) as FrameData;
+    const imageData = new ImageData(frame.data, frame.width, frame.height);
+
+    updatePreview(streamKey, imageData);
+}
+
+async function updatePreview(streamKey: string, data: ImageData | ImageBitmap) {
+    const { width, height } = data;
+    const isWidthLarge = width > maxWidth;
+    const bitmap = await createImageBitmap(data, {
+        resizeWidth: isWidthLarge ? maxWidth : undefined,
+        resizeHeight: isWidthLarge ? undefined : maxHeight,
+        resizeQuality: "high"
+    });
+
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width ?? width;
+    canvas.height = bitmap.height ?? height;
+
+    const ctx = canvas.getContext("2d");
+    ctx!.drawImage(bitmap, 0, 0, bitmap.width, bitmap.height);
+    const imageData = canvas.toDataURL("image/jpeg");
+
+    FluxDispatcher.dispatch({
+        type: "STREAM_PREVIEW_FETCH_SUCCESS",
+        streamKey: streamKey,
+        previewURL: imageData
+    });
+
+    postPreview(streamKey, imageData);
+}
+
+async function postPreview(streamKey: string, imageData: string) {
+    try {
+        await RestAPI.post({
+            url: Constants.Endpoints.STREAM_PREVIEW(streamKey),
+            body: {
+                thumbnail: imageData
+            }
+        });
+    }
+    catch (e: any) {
+        if (e.status !== 429) throw e;
+
+        const retryAfter = e.body.retry_after;
+
+        if (retryUpdate) {
+            clearTimeout(retryUpdate);
+        }
+
+        retryUpdate = setTimeout(async () => {
+            await postPreview(streamKey, imageData);
+            retryUpdate = undefined;
+        }, retryAfter);
+    }
+}
+
+function streamContext(children, { stream }: { stream: Stream; }) {
+    const myId = UserStore.getCurrentUser().id;
+    if (stream.ownerId !== myId) return;
+
+    const previewDisabled = disableStreamPreviews.getSetting();
+
+    const disablePreviewItem = (
+        <Menu.MenuCheckboxItem
+            checked={previewDisabled}
+            label={"Disable Default Previews"}
+            id="toggle-default-previews"
+            action={async () => {
+                disableStreamPreviews.updateSetting(!previewDisabled);
+            }}
+        />
+    );
+    children.push(<Menu.MenuSeparator />, disablePreviewItem);
+
+    if (!previewDisabled) return;
+
+    const customPreviewItem = (
+        <Menu.MenuItem
+            label="Upload Preview"
+            id="upload-preview"
+            icon={ScreenshareIcon}
+            action={() => stream && uploadPreview(stream)}
+            disabled={!stream}
+        />
+    );
+    const capturePreviewItem = (
+        <Menu.MenuItem
+            label="Capture Preview"
+            id="capture-preview"
+            icon={ScreenshareIcon}
+            action={() => stream && uploadScreenPreview(`${stream.streamType}:${stream.guildId}:${stream.channelId}:${stream.ownerId}`)}
+            disabled={!stream}
+        />
+    );
+    children.push(<Menu.MenuSeparator />, customPreviewItem, capturePreviewItem);
+}
+
+function streamsContext(children, { activeStreams }: { activeStreams: Stream[]; }) {
+    const stream = activeStreams[0];
+    if (!stream) return;
+
+    streamContext(children, { stream });
+}
+
+function userContext(children, { user }: { user: User; }) {
+    const stream = ApplicationStreamingStore.getAnyStreamForUser(user.id);
+    if (!stream) return;
+
+    streamContext(children, { stream });
+}
+
+async function startStream() {
     const channelId = SelectedChannelStore.getChannelId();
     const { sourceId, audioSourceId } = settings.store;
 
@@ -133,7 +238,7 @@ function startStream() {
     const channel = ChannelStore.getChannel(channelId);
     const isCall = channel.type === ChannelTypes.DM;
 
-    FluxDispatcher.dispatch({
+    await FluxDispatcher.dispatch({
         type: "STREAM_START",
         streamType: !isCall ? "guild" : "call",
         guildId: !isCall ? channel.getGuildId() : null,

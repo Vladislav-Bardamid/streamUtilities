@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-interface RTCConnectionVideoEventArgs {
+export interface RTCConnectionVideoEventArgs {
     guildId: string;
     channelId: string;
     userId: string;
@@ -12,7 +12,7 @@ interface RTCConnectionVideoEventArgs {
     context: string;
 }
 
-interface StreamStartEventArgs {
+export interface StreamStartEventArgs {
     appContext: string;
     audioSourceId: string;
     channelId: string;
@@ -25,10 +25,16 @@ interface StreamStartEventArgs {
     type: string;
 }
 
-interface Stream {
+export interface Stream {
     channelId: string;
     guildId: string;
     ownerId: string;
     state: string;
     streamType: string;
+}
+
+export interface FrameData {
+    data: ImageDataArray;
+    width: number;
+    height: number;
 }
