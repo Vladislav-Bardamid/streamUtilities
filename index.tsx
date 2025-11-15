@@ -26,6 +26,7 @@ import { findByPropsLazy, findLazy, findStoreLazy } from "@webpack";
 import { ChannelStore, Constants, FluxDispatcher, Menu, RestAPI, SelectedChannelStore, UserStore } from "@webpack/common";
 
 import { FrameData, RTCConnectionVideoEventArgs, Stream, StreamStartEventArgs } from "./types";
+import { streamToStreamKey } from "./utils";
 
 const ApplicationStreamingStore = findStoreLazy("ApplicationStreamingStore");
 const disableStreamPreviews = getUserSettingLazy<boolean>("voiceAndVideo", "disableStreamPreviews")!;
@@ -79,9 +80,11 @@ export default definePlugin({
         });
 
         document.addEventListener("keydown", e => {
-            if (e.code !== "KeyS" || !e.ctrlKey || !e.shiftKey || e.altKey || streamId) return;
+            if (e.code !== "KeyS" || !e.ctrlKey || !e.shiftKey || e.altKey) return;
 
-            startStream();
+            streamId
+                ? uploadScreenPreview()
+                : startStream();
         });
     },
 
@@ -104,17 +107,22 @@ export default definePlugin({
     }
 });
 
-async function uploadPreview(stream: Stream) {
-    const streamKey = `${stream.streamType}:${stream.guildId}:${stream.channelId}:${stream.ownerId}`;
-
+async function uploadPreview(stream?: Stream) {
     const file = await chooseFile("image/*");
     if (!file) return;
 
+    stream ??= ApplicationStreamingStore.getCurrentUserActiveStream();
+    const streamKey = streamToStreamKey(stream!);
+
     const image = await createImageBitmap(file);
+
     updatePreview(streamKey, image);
 }
 
-async function uploadScreenPreview(streamKey: string) {
+async function uploadScreenPreview(stream?: Stream) {
+    stream ??= ApplicationStreamingStore.getCurrentUserActiveStream();
+    const streamKey = streamToStreamKey(stream!);
+
     const discordVoice = DiscordNative.nativeModules.requireModule("discord_voice");
 
     const frame = await discordVoice.getNextVideoOutputFrame(streamId) as FrameData;
@@ -147,6 +155,11 @@ async function updatePreview(streamKey: string, data: ImageData | ImageBitmap) {
     });
 
     postPreview(streamKey, imageData);
+
+    const previewDisabled = disableStreamPreviews.getSetting();
+    if (previewDisabled) return;
+
+    disableStreamPreviews.updateSetting(true);
 }
 
 async function postPreview(streamKey: string, imageData: string) {
@@ -183,24 +196,17 @@ function streamContext(children, { stream }: { stream: Stream; }) {
     const disablePreviewItem = (
         <Menu.MenuCheckboxItem
             checked={previewDisabled}
-            label={"Disable Default Previews"}
-            id="toggle-default-previews"
-            action={async () => {
-                disableStreamPreviews.updateSetting(!previewDisabled);
-            }}
+            label={"Disable Preview Updating"}
+            id="disable-previews-updating"
+            action={() => disableStreamPreviews.updateSetting(!previewDisabled)}
         />
     );
-    children.push(<Menu.MenuSeparator />, disablePreviewItem);
-
-    if (!previewDisabled) return;
-
     const customPreviewItem = (
         <Menu.MenuItem
             label="Upload Preview"
             id="upload-preview"
             icon={ScreenshareIcon}
-            action={() => stream && uploadPreview(stream)}
-            disabled={!stream}
+            action={() => uploadPreview(stream)}
         />
     );
     const capturePreviewItem = (
@@ -208,11 +214,16 @@ function streamContext(children, { stream }: { stream: Stream; }) {
             label="Capture Preview"
             id="capture-preview"
             icon={ScreenshareIcon}
-            action={() => stream && uploadScreenPreview(`${stream.streamType}:${stream.guildId}:${stream.channelId}:${stream.ownerId}`)}
-            disabled={!stream}
+            action={() => uploadScreenPreview(stream)}
         />
     );
-    children.push(<Menu.MenuSeparator />, customPreviewItem, capturePreviewItem);
+    children.push(
+        <Menu.MenuSeparator />,
+        disablePreviewItem,
+        <Menu.MenuSeparator />,
+        customPreviewItem,
+        capturePreviewItem
+    );
 }
 
 function streamsContext(children, { activeStreams }: { activeStreams: Stream[]; }) {
@@ -223,7 +234,10 @@ function streamsContext(children, { activeStreams }: { activeStreams: Stream[]; 
 }
 
 function userContext(children, { user }: { user: User; }) {
-    const stream = ApplicationStreamingStore.getAnyStreamForUser(user.id);
+    const myId = UserStore.getCurrentUser().id;
+    if (user.id !== myId) return;
+
+    const stream = ApplicationStreamingStore.getCurrentUserActiveStream();
     if (!stream) return;
 
     streamContext(children, { stream });
