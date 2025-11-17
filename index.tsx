@@ -96,7 +96,7 @@ export default definePlugin({
 
             streamId = e.streamId;
 
-            if (streamId || !retryUpdate) return;
+            if (e.streamId || !retryUpdate) return;
 
             clearTimeout(retryUpdate);
             retryUpdate = undefined;
@@ -148,18 +148,21 @@ async function updatePreview(streamKey: string, data: ImageData | ImageBitmap) {
     ctx!.drawImage(bitmap, 0, 0, bitmap.width, bitmap.height);
     const imageData = canvas.toDataURL("image/jpeg");
 
-    FluxDispatcher.dispatch({
-        type: "STREAM_PREVIEW_FETCH_SUCCESS",
-        streamKey: streamKey,
-        previewURL: imageData
-    });
-
+    setLocalPreview(streamKey, imageData);
     postPreview(streamKey, imageData);
 
     const previewDisabled = disableStreamPreviews.getSetting();
     if (previewDisabled) return;
 
     disableStreamPreviews.updateSetting(true);
+}
+
+async function setLocalPreview(streamKey: string, imageData: string) {
+    FluxDispatcher.dispatch({
+        type: "STREAM_PREVIEW_FETCH_SUCCESS",
+        streamKey: streamKey,
+        previewURL: imageData
+    });
 }
 
 async function postPreview(streamKey: string, imageData: string) {
@@ -195,9 +198,9 @@ function streamContext(children, { stream }: { stream: Stream; }) {
 
     const disablePreviewItem = (
         <Menu.MenuCheckboxItem
-            checked={previewDisabled}
-            label={"Disable Preview Updating"}
-            id="disable-previews-updating"
+            checked={!previewDisabled}
+            label={"Preview Auto-Update"}
+            id="preview-auto-update"
             action={() => disableStreamPreviews.updateSetting(!previewDisabled)}
         />
     );
