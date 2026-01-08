@@ -18,25 +18,15 @@
 
 import { definePluginSettings } from "@api/Settings";
 import { getUserSettingLazy } from "@api/UserSettings";
-import { ScreenshareIcon } from "@components/index";
 import definePlugin, { OptionType } from "@utils/types";
-import { chooseFile } from "@utils/web";
-import { User } from "@vencord/discord-types";
-import { findByPropsLazy, findLazy, findStoreLazy } from "@webpack";
-import { ChannelStore, Constants, FluxDispatcher, Menu, RestAPI, SelectedChannelStore, UserStore } from "@webpack/common";
+import { findByPropsLazy, findLazy } from "@webpack";
+import { ChannelStore, FluxDispatcher, SelectedChannelStore, UserStore } from "@webpack/common";
 
-import { FrameData, RTCConnectionVideoEventArgs, Stream, StreamStartEventArgs } from "./types";
-import { streamToStreamKey } from "./utils";
+import { RTCConnectionVideoEventArgs, StreamStartEventArgs } from "./types";
 
-const ApplicationStreamingStore = findStoreLazy("ApplicationStreamingStore");
 const disableStreamPreviews = getUserSettingLazy<boolean>("voiceAndVideo", "disableStreamPreviews")!;
 const ChannelTypes = findLazy(m => m.ANNOUNCEMENT_THREAD === 10);
 const { setGoLiveSource } = findByPropsLazy("setGoLiveSource");
-
-const maxWidth = 512;
-const maxHeight = 512;
-
-let retryUpdate: any | undefined;
 
 let streamId: number;
 
@@ -63,12 +53,6 @@ export default definePlugin({
 
     settings,
 
-    contextMenus: {
-        "stream-context": streamContext,
-        "manage-streams": streamsContext,
-        "user-context": userContext
-    },
-
     start: () => {
         setGoLiveSource({
             "qualityOptions": {
@@ -80,11 +64,9 @@ export default definePlugin({
         });
 
         document.addEventListener("keydown", e => {
-            if (e.code !== "KeyS" || !e.ctrlKey || !e.shiftKey || e.altKey) return;
+            if (e.code !== "KeyS" || !e.ctrlKey || !e.shiftKey || e.altKey || !streamId) return;
 
-            streamId
-                ? uploadScreenPreview()
-                : startStream();
+            startStream();
         });
     },
 
@@ -95,156 +77,12 @@ export default definePlugin({
             if (e.context !== "stream" || e.userId !== myId) return;
 
             streamId = e.streamId;
-
-            if (e.streamId || !retryUpdate) return;
-
-            clearTimeout(retryUpdate);
-            retryUpdate = undefined;
         },
         STREAM_START: (e: StreamStartEventArgs) => {
             saveStreamSettings(e);
         }
     }
 });
-
-async function uploadPreview(stream?: Stream) {
-    const file = await chooseFile("image/*");
-    if (!file) return;
-
-    stream ??= ApplicationStreamingStore.getCurrentUserActiveStream();
-    const streamKey = streamToStreamKey(stream!);
-
-    const image = await createImageBitmap(file);
-
-    updatePreview(streamKey, image);
-}
-
-async function uploadScreenPreview(stream?: Stream) {
-    stream ??= ApplicationStreamingStore.getCurrentUserActiveStream();
-    const streamKey = streamToStreamKey(stream!);
-
-    const discordVoice = DiscordNative.nativeModules.requireModule("discord_voice");
-
-    const frame = await discordVoice.getNextVideoOutputFrame(streamId) as FrameData;
-    const imageData = new ImageData(frame.data, frame.width, frame.height);
-
-    updatePreview(streamKey, imageData);
-}
-
-async function updatePreview(streamKey: string, data: ImageData | ImageBitmap) {
-    const { width, height } = data;
-    const isWidthLarge = width > maxWidth;
-    const bitmap = await createImageBitmap(data, {
-        resizeWidth: isWidthLarge ? maxWidth : undefined,
-        resizeHeight: isWidthLarge ? undefined : maxHeight,
-        resizeQuality: "high"
-    });
-
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width ?? width;
-    canvas.height = bitmap.height ?? height;
-
-    const ctx = canvas.getContext("2d");
-    ctx!.drawImage(bitmap, 0, 0, bitmap.width, bitmap.height);
-    const imageData = canvas.toDataURL("image/jpeg");
-
-    setLocalPreview(streamKey, imageData);
-    postPreview(streamKey, imageData);
-
-    const previewDisabled = disableStreamPreviews.getSetting();
-    if (previewDisabled) return;
-
-    disableStreamPreviews.updateSetting(true);
-}
-
-async function setLocalPreview(streamKey: string, imageData: string) {
-    FluxDispatcher.dispatch({
-        type: "STREAM_PREVIEW_FETCH_SUCCESS",
-        streamKey: streamKey,
-        previewURL: imageData
-    });
-}
-
-async function postPreview(streamKey: string, imageData: string) {
-    try {
-        await RestAPI.post({
-            url: Constants.Endpoints.STREAM_PREVIEW(streamKey),
-            body: {
-                thumbnail: imageData
-            }
-        });
-    }
-    catch (e: any) {
-        if (e.status !== 429) throw e;
-
-        const retryAfter = e.body.retry_after;
-
-        if (retryUpdate) {
-            clearTimeout(retryUpdate);
-        }
-
-        retryUpdate = setTimeout(async () => {
-            await postPreview(streamKey, imageData);
-            retryUpdate = undefined;
-        }, retryAfter);
-    }
-}
-
-function streamContext(children, { stream }: { stream: Stream; }) {
-    const myId = UserStore.getCurrentUser().id;
-    if (stream.ownerId !== myId) return;
-
-    const previewDisabled = disableStreamPreviews.getSetting();
-
-    const disablePreviewItem = (
-        <Menu.MenuCheckboxItem
-            checked={!previewDisabled}
-            label={"Preview Auto-Update"}
-            id="preview-auto-update"
-            action={() => disableStreamPreviews.updateSetting(!previewDisabled)}
-        />
-    );
-    const customPreviewItem = (
-        <Menu.MenuItem
-            label="Upload Preview"
-            id="upload-preview"
-            icon={ScreenshareIcon}
-            action={() => uploadPreview(stream)}
-        />
-    );
-    const capturePreviewItem = (
-        <Menu.MenuItem
-            label="Capture Preview"
-            id="capture-preview"
-            icon={ScreenshareIcon}
-            action={() => uploadScreenPreview(stream)}
-        />
-    );
-    children.push(
-        <Menu.MenuSeparator />,
-        disablePreviewItem,
-        <Menu.MenuSeparator />,
-        customPreviewItem,
-        capturePreviewItem
-    );
-}
-
-function streamsContext(children, { activeStreams }: { activeStreams: Stream[]; }) {
-    const stream = activeStreams[0];
-    if (!stream) return;
-
-    streamContext(children, { stream });
-}
-
-function userContext(children, { user }: { user: User; }) {
-    const myId = UserStore.getCurrentUser().id;
-    if (user.id !== myId) return;
-
-    const stream = ApplicationStreamingStore.getCurrentUserActiveStream();
-    if (!stream) return;
-
-    streamContext(children, { stream });
-}
 
 async function startStream() {
     const channelId = SelectedChannelStore.getChannelId();
