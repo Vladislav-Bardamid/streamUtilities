@@ -64,7 +64,7 @@ export default definePlugin({
         });
 
         document.addEventListener("keydown", e => {
-            if (e.code !== "KeyS" || !e.ctrlKey || !e.shiftKey || e.altKey || !streamId) return;
+            if (e.code !== "KeyS" || !e.ctrlKey || !e.shiftKey || e.altKey || streamId) return;
 
             startStream();
         });
