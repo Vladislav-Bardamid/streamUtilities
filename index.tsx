@@ -47,7 +47,7 @@ const settings = definePluginSettings({
 });
 
 export default definePlugin({
-    name: "streamUtilities",
+    name: "StreamUtilities",
     description: "A set of utilities for managing and enhancing streaming functionality",
     authors: [/* Devs.Zorian*/],
 
